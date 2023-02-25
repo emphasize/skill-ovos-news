@@ -279,7 +279,7 @@ class NewsSkill(OVOSCommonPlaybackSkill):
                 "secondary_langs": ["pt"]
             }
         },
-        "de": {
+        "de-de": {
             "DLF - Die Nachrichten": {
                 "aliases": ["DLF", "deutschlandfunk"],
                 "uri": "rss//https://www.deutschlandfunk.de/podcast-nachrichten.1257.de.podcast.xml",
