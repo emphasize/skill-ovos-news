@@ -2,11 +2,13 @@ from os.path import join, dirname
 
 from ovos_plugin_common_play.ocp import MediaType, PlaybackType, \
     MatchConfidence
-from ovos_utils.parse import match_one, MatchStrategy
+from ovos_utils.parse import match_one, fuzzy_match, MatchStrategy
 from ovos_workshop.skills.common_play import OVOSCommonPlaybackSkill, \
     ocp_search, ocp_featured_media
 from ovos_utils.process_utils import RuntimeRequirements
 from ovos_utils import classproperty
+
+MAX_SCORE = 100
 
 
 # Unified News Skill
@@ -543,29 +545,40 @@ class NewsSkill(OVOSCommonPlaybackSkill):
         langs += [l.split("-")[0] for l in langs]
         return list(set(langs))
 
-    def _score(self, phrase, entry, langs=None, base_score=0):
-        score = base_score
+    def _score(self, phrase, entry, media_type, langs=None):
         langs = langs or [self.lang]
 
-        # match name
-        _, alias_score = match_one(phrase, entry["aliases"],
-                                   strategy=MatchStrategy.TOKEN_SORT_RATIO)
-        entry["match_confidence"] = score + alias_score * 60
-
-        # match languages
+        # filter feeds not matching any known language (primary/secondary)
+        if not any([lang in langs for lang in entry['lang'].split("-")]):
+            return 0
+        
+        # languages match
+        lang_score = 0
         if entry["lang"] in langs:
-            entry["match_confidence"] += 20  # lang bonus
+            lang_score = MAX_SCORE
         elif any([lang in entry.get("secondary_langs", [])
                   for lang in langs]):
-            entry["match_confidence"] += 10  # smaller lang bonus
-        else:
-            entry["match_confidence"] -= 20  # wrong language penalty
+            lang_score = MAX_SCORE - 10  # smaller lang bonus
+            
+        # location match
+        # _, location_score = match_one(phrase, entry["location"],
+        #                            strategy=MatchStrategy.TOKEN_SORT_RATIO)
+        # location_score *= MAX_SCORE
 
-        # default news feed gets a nice bonus
-        if entry.get("is_default"):
-            entry["match_confidence"] += 30
+        # "play the <lang> news" (phrase should filter "noise words")
+        if entry.get("is_default") and not phrase:
+            return lang_score
+        
+        # name match
+        _, alias_score = match_one(phrase, entry["aliases"],
+                                   strategy=MatchStrategy.TOKEN_SORT_RATIO)
+        alias_score *= MAX_SCORE
 
-        return min([entry["match_confidence"], 100])
+        # media match
+        media_type_score = MAX_SCORE if media_type in entry.get("match_types") \
+                else 0
+
+        return (media_type_score + alias_score + lang_score) / 3
 
     @ocp_featured_media()
     def news_playlist(self):
@@ -590,7 +603,7 @@ class NewsSkill(OVOSCommonPlaybackSkill):
         return entries
 
     @ocp_search()
-    def search_news(self, phrase, media_type):
+    def search_news(self, phrase, media_type = MediaType.NEWS):
         """Analyze phrase to see if it is a play-able phrase with this skill.
 
         Arguments:
@@ -608,16 +621,9 @@ class NewsSkill(OVOSCommonPlaybackSkill):
                 "bg_image": "http://optional.audioservice.background.jpg"
             }
         """
-        base_score = 0
-        if media_type == MediaType.NEWS or self.voc_match(phrase, "news"):
-            base_score = 50
-            if not phrase.strip():
-                base_score += 20  # "play the news", no query
-
         pl = self.news_playlist()
         # playlist result
         yield {
-            "match_confidence": base_score,
             "media_type": MediaType.NEWS,
             "playlist": pl,
             "playback": PlaybackType.AUDIO,
@@ -631,10 +637,14 @@ class NewsSkill(OVOSCommonPlaybackSkill):
         # score individual results
         langs = self.match_lang(phrase) or [self.lang, self.lang.split("-")[0]]
         phrase = self.clean_phrase(phrase)
-        if media_type == MediaType.NEWS or (phrase and base_score > MatchConfidence.AVERAGE_LOW):
-            for v in pl:
-                v["match_confidence"] = self._score(phrase, v, langs=langs, base_score=base_score)
-                yield v
+        for entry in pl:
+            score = self._score(phrase, entry, media_type, langs)
+            if score < MatchConfidence.AVERAGE:
+                continue
+
+            self.extend_timeout(0.2)
+            entry["match_confidence"] = score
+            yield entry
 
 
 def create_skill():
